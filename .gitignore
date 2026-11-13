@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+
+# Cloudora runtime data - NEVER commit
+wayland-restore-token
+data/
+cloudora-data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.pem
+*.key
+*.crt
+*.token
+relay_token
+backups/
+*.cloudora
+config.toml
+!scripts/*.example
+
+# browser network recordings contain cookies and session tokens
+*.har
+
+# temporary files of test runs (browser profiles, throw-away Cloudora data)
+.test-tmp/
