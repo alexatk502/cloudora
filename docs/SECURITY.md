@@ -71,6 +71,12 @@ log, and on Linux/Wayland the desktop's remote-control permission token.
 * Keys and mouse buttons still held when a viewer disconnects are released on the host (tested), so a dropped
   connection never leaves Ctrl or a mouse button stuck down.
 * `--view-only` ignores all input (tested), including relative motion.
+* **WebTransport** (`webtransport.py`, UDP on the same port number, direct HTTPS mode only) applies the same rules as
+  the WebSocket: the Origin must be the portal's own (else 403), and the first message must be the screen token of
+  a live sign-in (else the viewer is sent to sign in, and the screen is not opened); a connection that does not
+  present it within 10 seconds is dropped (all tested). Its certificate is a separate ECDSA P-256 one made at every
+  start, valid 13 days (renewed after 6), which the browser accepts only because the viewer page - delivered over
+  Cloudora's HTTPS - names its SHA-256 hash; no other server can stand in for it.
 * **Sound** is captured only while a signed-in viewer has it turned on, and only what the host plays (never a
   microphone). Relative-motion messages are validated like all input (ranges, sizes).
 * The screen is opened only while a viewer is connected (and for 30 seconds after, for quick reconnects).

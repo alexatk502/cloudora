@@ -27,8 +27,12 @@ There are no settings: everything adapts by itself. The page is just the screen.
   without ever being copied. Measured on a real 1920×1200 desktop: 54-58 fps at about 0.1-0.2 Mb/s, using under a
   fifth of one CPU core for everything. Without a GPU encoder, software H.264 still gives 40-50 fps at about 1-2
   Mb/s. Older browsers get JPEG patches of the changed areas.
-* **Latency:** a picture leaves as soon as it is encoded, only about one round trip's worth is ever on its way, so
-  no queue builds up, and quality and size follow the connection's speed. Pointer moves are sent at once.
+* **Latency:** a picture leaves as soon as it is encoded (on the GPU path about 4 ms after the screen changed),
+  only about one round trip's worth is ever on its way, so no queue builds up, and quality and size follow the
+  connection's speed. Up to 120 fps when the viewing screen runs at 120/144 Hz. Pointer moves are sent at once.
+* **Transport:** WebTransport (HTTP/3 over QUIC, UDP) where the browser has it, so Wi-Fi's late packets do not
+  stall everything as they do over TCP; on emulated bad Wi-Fi it removed every lag spike over 100 ms. Pictures,
+  sound and input travel independently. Otherwise, or through a tunnel, the WebSocket.
 * **Smoothness on Wi-Fi:** like live-video players, the viewer measures how unevenly pictures arrive and holds them
   just long enough to show them at an even pace - nothing on a steady link, at most 50 ms on a jittery one.
 * **Sound:** what the host plays (Opus, about 40 ms of buffer, kept in step with the picture; Linux and Windows
@@ -68,7 +72,7 @@ prints the address to open, the HTTPS certificate fingerprint, and the **secret 
 | `quickstart --anywhere` | any network: a free Cloudflare quick tunnel gives a public `https://…trycloudflare.com` address (no account, no router changes) |
 | `quickstart --local` | this computer only (to try it out) |
 
-From outside your network without `--anywhere`: forward the port (8743) on your router, or use your own VPN (e.g.
+From outside your network without `--anywhere`: forward port 8743 (TCP, and UDP for WebTransport) on your router, or use your own VPN (e.g.
 WireGuard or Tailscale) and `--host <the VPN address>`.
 
 **First run on each platform:**

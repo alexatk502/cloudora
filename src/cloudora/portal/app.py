@@ -54,6 +54,7 @@ class Portal:
     def __init__(self, app: "Cloudora"):
         self.app = app
         self.csrf_key = secrets.token_bytes(32)   # new every start: forms from before a restart stop working
+        self.webtransport = None                  # cloudora.webtransport.WebTransportServer, when it runs
 
     def client_ip(self, request: Request) -> str:
         """The visitor's address, used only to rate-limit wrong keys (kept in memory, never logged)."""
@@ -179,7 +180,10 @@ def create_portal(app: "Cloudora") -> FastAPI:
         csp = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
                f"connect-src 'self' wss://{host} ws://{host}; form-action 'none'; frame-ancestors 'none'; "
                "base-uri 'none'")
-        return html_response(pages.viewer_page(portal.screen_token(session)), csp=csp)
+        # WebTransport only where the viewer reaches Cloudora directly: a tunnel or proxy carries no UDP
+        public = urlsplit(portal.app.config.public_url).netloc if portal.app.config.public_url else ""
+        wt = portal.webtransport.offer() if portal.webtransport is not None and host != public else ""
+        return html_response(pages.viewer_page(portal.screen_token(session), wt), csp=csp)
 
     @web.websocket("/ws")
     async def screen_ws(ws: WebSocket):

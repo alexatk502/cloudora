@@ -63,7 +63,8 @@ the printed `https://<address>:8743` addresses on a device on the same network.
 * **VPN** (recommended): with WireGuard, Tailscale or similar on both devices, start Cloudora with
   `--host <the host's VPN address>` and open `https://<that address>:8743` from the other device. Nothing is exposed
   to the internet.
-* **Port forwarding:** forward TCP port 8743 on your router to the host and open `https://<your public IP>:8743`.
+* **Port forwarding:** forward port 8743, TCP and UDP (UDP carries WebTransport, the lower-latency transport;
+  without it the viewer uses the WebSocket), on your router to the host and open `https://<your public IP>:8743`.
   The sign-in page is then reachable by anyone on the internet; the key and the rate limits protect it.
 
 ### From anywhere, with a Cloudflare tunnel: `--anywhere`
@@ -109,7 +110,7 @@ desktop's "autostart" settings). Use `--key-file`: when the output is not a term
 | What you see | What to do |
 |---|---|
 | `port 8743 is already in use` | An earlier Cloudora is still running: stop it (Ctrl+C in its window), or use `--port`. |
-| The other device cannot open the address | Same network? Windows: allow Cloudora in the firewall (private networks). Linux: open the port in `firewalld`/`ufw`. Try the other printed addresses. |
+| The other device cannot open the address | Same network? Windows: allow Cloudora in the firewall (private networks). Linux: open the port in `firewalld`/`ufw` (TCP, and UDP for WebTransport). Try the other printed addresses. |
 | The browser warns about the certificate | Expected once with the default mode: compare the fingerprint Cloudora printed, then continue. |
 | `SCREEN: NOT READY - … graphical desktop session` | Start Cloudora from a terminal inside the desktop, not over SSH or as a service. |
 | *Waiting for someone at the computer to allow remote control* | Linux/Wayland: allow it in the dialog on the host (tick "remember"). |

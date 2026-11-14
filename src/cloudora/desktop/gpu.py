@@ -140,10 +140,16 @@ class GstEncoder:
                                                       f"cpb-size={max(1, self.kbps // self.fps)}")
         src = source or (f"pipewiresrc fd={pw_fd} path={node} always-copy=false client-name={self.name} "
                          f"keepalive-time={KEEPALIVE_MS} stream-properties=props,node.name=(string){self.name}")
+        # Latency: at most one raw picture waits before the encoder (older ones are dropped, never encoded) and at
+        # most one encoded picture waits for Cloudora. Encoded pictures cannot be dropped (each builds on the
+        # last), so a deeper output buffer would fill during a network stall and then never drain - every later
+        # picture arriving that much older (measured: 4 buffers = pictures 28 ms old at steady 60 fps and ~90 ms
+        # after a stall; 1 buffer = 4 ms). Fast screens (120/144 Hz) are held to the frame rate wanted by a probe
+        # below (videorate cannot: screens report a variable frame rate).
         description = (f"{src} ! queue max-size-buffers=1 leaky=downstream ! vapostproc name=conv ! "
                        f"capsfilter name=size caps=video/x-raw(memory:VAMemory),format=NV12 ! "
                        f"{element} name=enc {props} ref-frames=1 key-int-max=1024 target-usage=6 ! {parse} ! "
-                       f"appsink name=out sync=false max-buffers=4 drop=false emit-signals=false")
+                       f"appsink name=out sync=false max-buffers=1 drop=false emit-signals=false")
         try:
             self.pipe = Gst.parse_launch(description)
         except Exception as exc:  # noqa: BLE001
@@ -155,8 +161,23 @@ class GstEncoder:
             if event is not None and event.type == Gst.EventType.RECONFIGURE:
                 return Gst.PadProbeReturn.DROP
             return Gst.PadProbeReturn.OK
-        self._probe = self.pipe.get_by_name("conv").get_static_pad("sink").add_probe(
-            Gst.PadProbeType.EVENT_UPSTREAM, keep_source)
+        conv_sink = self.pipe.get_by_name("conv").get_static_pad("sink")
+        self._probe = conv_sink.add_probe(Gst.PadProbeType.EVENT_UPSTREAM, keep_source)
+        # At most `fps` pictures a second reach the encoder, dropped here before any GPU work: each picture has a
+        # due time one interval after the last one's (a quarter interval early is fine, so pictures at the screen's
+        # own pace always pass); on a faster screen (120/144 Hz) that averages exactly `fps`.
+        interval = Gst.SECOND // self.fps
+        early, due = interval // 4, [-1]
+
+        def pace(_pad, info):
+            pts = info.get_buffer().pts
+            if pts == Gst.CLOCK_TIME_NONE:
+                return Gst.PadProbeReturn.OK
+            if due[0] >= 0 and pts < due[0] - early:
+                return Gst.PadProbeReturn.DROP
+            due[0] = due[0] + interval if due[0] >= 0 and pts - due[0] < interval else pts + interval
+            return Gst.PadProbeReturn.OK
+        conv_sink.add_probe(Gst.PadProbeType.BUFFER, pace)
         self.enc = self.pipe.get_by_name("enc")
         self.size_filter = self.pipe.get_by_name("size")
         self.out = self.pipe.get_by_name("out")

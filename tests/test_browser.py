@@ -89,7 +89,9 @@ async def firefox(tmp_path):
             proc.kill()
 
 
-async def test_viewer_in_firefox(env, tmp_path, monkeypatch):
+@pytest.mark.parametrize("transport", ["webtransport", "websocket"])
+async def test_viewer_in_firefox(env, tmp_path, monkeypatch, transport):
+    """Over WebTransport, and over the WebSocket when WebTransport cannot connect (here: UDP blocked)."""
     import uvicorn
 
     class _Server(uvicorn.Server):
@@ -99,11 +101,23 @@ async def test_viewer_in_firefox(env, tmp_path, monkeypatch):
     cfg = Config(data_dir=tmp_path / "tls", tls=True)
     ensure_certificate(cfg)
     port = free_port()
-    srv = _Server(uvicorn.Config(create_portal(env.app), host="127.0.0.1", port=port, log_level="warning",
+    web = create_portal(env.app)
+    srv = _Server(uvicorn.Config(web, host="127.0.0.1", port=port, log_level="warning",
                                  ssl_context_factory=lambda _c, _d: ssl_context(cfg), ws_per_message_deflate=False))
     task = asyncio.create_task(srv.serve())
     while not srv.started:
         await asyncio.sleep(0.01)
+    gate = None
+    if transport == "webtransport":
+        from cloudora.webtransport import WebTransportServer
+        gate = WebTransportServer(env.app, web.state.portal)
+        assert await gate.start("127.0.0.1", port)
+        web.state.portal.webtransport = gate
+    else:                       # offered, but nothing answers on UDP: the viewer must fall back to the WebSocket
+        class Blocked:
+            def offer(self):
+                return f"{free_port()},{base64.b64encode(bytes(32)).decode()}"
+        web.state.portal.webtransport = Blocked()
     base = f"https://127.0.0.1:{port}"
     env.screen.change(0, 0, 320, 200, (40, 30, 20))
     env.screen.change(160, 100, 64, 48, (0, 0, 255))        # a red block (BGR) in the lower right quarter
@@ -115,6 +129,8 @@ async def test_viewer_in_firefox(env, tmp_path, monkeypatch):
             await b.until(ctx, "location.pathname === '/' && !!document.getElementById('screen')")
             await b.until(ctx, "document.getElementById('screen').width === 320")
             await b.until(ctx, "document.getElementById('msg').hidden")
+            assert env.app.desktop.viewer.ws.__class__.__name__ == ("Channel" if transport == "webtransport"
+                                                                     else "WebSocket")
             # nothing but the screen: no menus, no buttons, no toolbar
             assert await b.js(ctx, "document.querySelectorAll('select, header, nav, button:not(#msg-retry)').length") == 0
             pixel = await b.js(ctx, "Array.from(document.getElementById('screen').getContext('2d')"
@@ -188,5 +204,7 @@ async def test_viewer_in_firefox(env, tmp_path, monkeypatch):
     finally:
         env.app.sessions.end_all("test over")
         await env.app.desktop.close()
+        if gate is not None:
+            gate.close()
         srv.should_exit = True
         await task

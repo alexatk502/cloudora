@@ -18,6 +18,7 @@ dependencies = [
     "mss>=9",
     "Pillow>=10",
     "av>=12",
+    "aioquic>=1.2",
     "jeepney>=0.8; sys_platform == 'linux'",
     "soundcard>=0.4; sys_platform == 'win32'",
 ]

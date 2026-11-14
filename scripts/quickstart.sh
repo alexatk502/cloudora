@@ -19,6 +19,11 @@ if [[ ! -x "$VENV/bin/cloudora" ]]; then
   "$PY" -m venv "$VENV"
   "$VENV/bin/pip" install -q --upgrade pip
   "$VENV/bin/pip" install -q -e "$ROOT"
+  touch "$VENV/.cloudora-installed"
+elif [[ "$ROOT/pyproject.toml" -nt "$VENV/.cloudora-installed" ]]; then
+  echo "[cloudora] updated: installing what the new version needs"
+  "$VENV/bin/pip" install -q -e "$ROOT"
+  touch "$VENV/.cloudora-installed"
 fi
 if [[ "$(uname)" == "Linux" && "${XDG_SESSION_TYPE:-}" == "wayland" ]] && ! command -v gst-launch-1.0 >/dev/null; then
   echo "[cloudora] this desktop uses Wayland: install GStreamer's PipeWire support first:" >&2

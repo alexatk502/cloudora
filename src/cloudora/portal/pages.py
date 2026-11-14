@@ -134,14 +134,14 @@ Anyone with the key can control this computer, so keep it private.</span></p>"""
                   head_first=f"<script>{LOGIN_JS}</script>")
 
 
-def viewer_page(screen_token: str) -> str:
+def viewer_page(screen_token: str, webtransport: str = "") -> str:
     """The screen, full window - nothing else. All behaviour is in /static/viewer.js; the page only carries its token."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="referrer" content="same-origin"><title>Cloudora</title>
 <link rel="stylesheet" href="/static/portal.css?v={CSS_VERSION}"></head>
-<body class="viewer"><div id="app" data-token="{e(screen_token)}" hidden></div>
+<body class="viewer"><div id="app" data-token="{e(screen_token)}" data-wt="{e(webtransport)}" hidden></div>
 <div id="stage"><canvas id="screen" tabindex="0" aria-label="The remote computer's screen"></canvas>
 <div id="cursor" hidden></div>
 <div id="msg" role="status"><b id="msg-title">Connecting…</b><span id="msg-text"></span>

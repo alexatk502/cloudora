@@ -46,6 +46,7 @@ class Cloudora:
         self.desktop = desktop or DesktopService(config.data_dir, view_only=config.view_only)
         self.sessions.on_end.append(self.desktop.session_ended)
         self.stopping = asyncio.Event()
+        self.webtransport = None          # the WebTransport (QUIC) server, when it runs
 
     def stop(self) -> None:
         self.stopping.set()
@@ -94,8 +95,9 @@ class Cloudora:
             def capture_signals(self):   # Cloudora handles the signals itself (clean shutdown below)
                 yield
 
+        web = create_portal(self)
         server = _Server(uvicorn.Config(
-            create_portal(self), host=cfg.host, port=cfg.port, log_level="warning",
+            web, host=cfg.host, port=cfg.port, log_level="warning",
             access_log=False,  # no request logs: nothing about visitors is recorded
             server_header=False, date_header=False, proxy_headers=False, ssl_context_factory=ssl_factory,
             limit_concurrency=cfg.max_connections, timeout_keep_alive=15, h11_max_incomplete_event_size=32 * 1024,
@@ -116,6 +118,11 @@ class Cloudora:
                 if task.done():
                     raise SystemExit(f"Cloudora: could not listen on port {cfg.port} - is another Cloudora still running?")
                 await asyncio.sleep(0.05)
+            if cfg.tls:                     # direct HTTPS: also offer WebTransport (QUIC, same port number on UDP)
+                from cloudora.webtransport import WebTransportServer
+                wt = WebTransportServer(self, web.state.portal)
+                if await wt.start(cfg.host, cfg.port):
+                    self.webtransport = web.state.portal.webtransport = wt
             if on_ready is not None:
                 ready_task = asyncio.ensure_future(on_ready())
             stopper = asyncio.ensure_future(self.stopping.wait())
@@ -135,6 +142,8 @@ class Cloudora:
                     t.cancel()
             self.sessions.end_all("Cloudora is stopping")
             await bounded(self.desktop.close(), 10, "the screen connection")
+            if self.webtransport is not None:
+                self.webtransport.close()
             server.should_exit = True
             await bounded(task, 10, "web server")
             for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", signal.SIGTERM)):

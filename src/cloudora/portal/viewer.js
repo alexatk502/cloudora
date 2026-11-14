@@ -16,7 +16,7 @@ const cv = $("screen"), stage = $("stage"), cur = $("cursor");
 const ctx = cv.getContext("2d", {alpha: false, desynchronized: true});
 const msgBox = $("msg"), msgTitle = $("msg-title"), msgText = $("msg-text"), retryBtn = $("msg-retry");
 
-let ws = null, retry = 0, ended = false, W = 0, H = 0, chain = Promise.resolve();
+let chan = null, retry = 0, ended = false, W = 0, H = 0, chain = Promise.resolve();
 let viewOnly = false, showCursor = false, hostRepeats = true, mouseInside = false, serverVideo = false;
 let serverAudio = false;
 let decodable = [];          // video codecs this browser decodes (WebCodecs), best first
@@ -39,7 +39,7 @@ function note(text) {                      // a passing notice over the picture
   show(text, "", false);
   msgTimer = setTimeout(() => { msgTimer = 0; hideMsg(); }, 4000);
 }
-const send = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+const send = o => { if (chan && chan.open) chan.send(JSON.stringify(o)); };
 
 // ------------------------------------------------------------------ size and settings (all automatic)
 function wanted() {
@@ -47,9 +47,23 @@ function wanted() {
   return {w: Math.max(160, Math.round(r.width * d)), h: Math.max(120, Math.round(r.height * d))};
 }
 const locked = () => document.pointerLockElement === cv;
+// The frame rate follows this display: 120 pictures a second on a 120/144 Hz screen (smoother, and each picture
+// waits less), 60 otherwise. Measured from the screen's own refresh.
+let refreshFps = 60;
+(() => {
+  const t = [];
+  const tick = now => {
+    t.push(now);
+    if (t.length < 40) { requestAnimationFrame(tick); return; }
+    const gaps = t.slice(1).map((x, i) => x - t[i]).sort((a, b) => a - b), mid = gaps[gaps.length >> 1];
+    const fps = mid > 0 && 1000 / mid >= 100 ? 120 : 60;
+    if (fps !== refreshFps) { refreshFps = fps; configure(); }
+  };
+  requestAnimationFrame(tick);
+})();
 function configure() {
   const s = wanted(), video = decodable.length && serverVideo;
-  send({t: "cfg", w: s.w, h: s.h, q: 80, auto: true, fps: video ? 60 : 30, codecs: video ? decodable : [],
+  send({t: "cfg", w: s.w, h: s.h, q: 80, auto: true, fps: video ? refreshFps : 30, codecs: video ? decodable : [],
         p: locked() ? "game" : "auto", audio: soundPlaying()});
 }
 const PROBES = [["av1", "av01.0.12M.08"], ["hevc", "hvc1.1.6.L150.B0"], ["vp9", "vp09.00.50.08"],
@@ -266,23 +280,118 @@ function control(o) {
 }
 
 // ------------------------------------------------------------------ connection
+// WebTransport (HTTP/3 over QUIC) when the computer offers it and this browser has it: pictures, sound and input
+// travel independently and Wi-Fi's late packets do not stall everything as they do over TCP. Otherwise - or if it
+// does not connect within 2 s (a firewall blocking UDP, say) - the WebSocket. Both carry the same messages.
+const WT_OFFER = $("app").dataset.wt || "";
+let wtFailures = 0;
+const wtBlocked = {                         // remembered for an hour, so a network that blocks UDP costs 2 s only once
+  get() { try { return Date.now() - Number(localStorage.getItem("cloudora.wt-blocked") || 0) < 3600e3; } catch (e) { return false; } },
+  set() { try { localStorage.setItem("cloudora.wt-blocked", String(Date.now())); } catch (e) { /* private mode */ } },
+  clear() { try { localStorage.removeItem("cloudora.wt-blocked"); } catch (e) { /* private mode */ } },
+};
+function closed(code) {                    // the connection ended (code: Cloudora's reason, if it gave one)
+  if (!chan) return;
+  chan.open = false; chan = null;
+  held.clear(); buttons.clear();
+  if (code === 4401) { location.replace("/login"); return; }
+  if (ended) return;
+  if (code === 4403) { ended = true; show("Refused", "This page is out of date. Reload it.", true); return; }
+  if (W) note("Reconnecting…");
+  setTimeout(connect, Math.min(5000, 400 * (++retry)));
+}
+function received(data) {
+  if (typeof data === "string") {
+    let o = null;
+    try { o = JSON.parse(data); } catch (e) { return; }
+    if (o.t === "close") { const c = chan; closed(o.code); if (c) c.close(); return; }
+    control(o);
+  } else picture(data);
+}
+function connectWebSocket() {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  const c = {open: false, kind: "websocket", send: s => ws.send(s), close: () => { try { ws.close(); } catch (e) { /* closed */ } }};
+  chan = c;
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { c.open = true; ws.send(JSON.stringify({k: TOKEN})); };
+  ws.onmessage = m => { if (chan === c) received(m.data); };
+  ws.onclose = e => { if (chan === c) closed(e.code); };
+}
+// Messages on WebTransport streams: u32 length (little-endian) | payload.
+async function readFrames(stream, onFrame) {
+  const r = stream.getReader(), parts = [];
+  let have = 0;
+  const take = n => {                       // the first n bytes, joined
+    const out = new Uint8Array(n);
+    let off = 0;
+    while (off < n) {
+      const p = parts[0], k = Math.min(p.length, n - off);
+      out.set(p.subarray(0, k), off); off += k;
+      if (k === p.length) parts.shift(); else parts[0] = p.subarray(k);
+    }
+    have -= n;
+    return out;
+  };
+  let need = -1;
+  for (;;) {
+    const {value, done} = await r.read();
+    if (done) return;
+    parts.push(value); have += value.length;
+    for (;;) {
+      if (need < 0) {
+        if (have < 4) break;
+        const h = take(4);
+        need = new DataView(h.buffer).getUint32(0, true);
+      }
+      if (have < need) break;
+      onFrame(take(need)); need = -1;
+    }
+  }
+}
+async function connectWebTransport() {
+  const [port, hash] = WT_OFFER.split(",");
+  const wt = new WebTransport(`https://${location.hostname}:${port}/wt`, {
+    serverCertificateHashes: [{algorithm: "sha-256", value: Uint8Array.from(atob(hash), ch => ch.charCodeAt(0))}],
+    congestionControl: "low-latency"});
+  let control;
+  try {
+    await Promise.race([wt.ready, new Promise((_, no) => setTimeout(() => no(new Error("timeout")), 2000))]);
+    control = await wt.createBidirectionalStream();
+  } catch (e) { try { wt.close(); } catch (x) { /* never opened */ } throw e; }
+  const writer = control.writable.getWriter(), enc = new TextEncoder(), dec = new TextDecoder();
+  const c = {open: true, kind: "webtransport", close: () => { try { wt.close(); } catch (e) { /* closed */ } },
+    send: s => {
+      const b = enc.encode(s), f = new Uint8Array(4 + b.length);
+      new DataView(f.buffer).setUint32(0, b.length, true); f.set(b, 4);
+      writer.write(f).catch(() => {});
+    }};
+  chan = c;
+  c.send(JSON.stringify({k: TOKEN}));
+  readFrames(control.readable, f => { if (chan === c) received(dec.decode(f)); }).catch(() => {});
+  (async () => {                              // pictures: Cloudora's stream(s)
+    const streams = wt.incomingUnidirectionalStreams.getReader();
+    for (;;) {
+      const {value, done} = await streams.read();
+      if (done) return;
+      readFrames(value, f => { if (chan === c) received(f.buffer); }).catch(() => {});
+    }
+  })().catch(() => {});
+  (async () => {                              // sound: datagrams (a lost one is skipped, never waited for)
+    const r = wt.datagrams.readable.getReader();
+    for (;;) {
+      const {value, done} = await r.read();
+      if (done) return;
+      if (chan === c) received(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    }
+  })().catch(() => {});
+  wt.closed.then(() => { if (chan === c) closed(0); }, () => { if (chan === c) closed(0); });
+}
 function connect() {
   ended = false;
-  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({k: TOKEN}));
-  ws.onmessage = m => {
-    if (typeof m.data === "string") { try { control(JSON.parse(m.data)); } catch (e) { /* ignore */ } }
-    else picture(m.data);
-  };
-  ws.onclose = e => {
-    held.clear(); buttons.clear();
-    if (e.code === 4401) { location.replace("/login"); return; }
-    if (ended) return;
-    if (e.code === 4403) { ended = true; show("Refused", "This page is out of date. Reload it.", true); return; }
-    if (W) note("Reconnecting…");
-    setTimeout(connect, Math.min(5000, 400 * (++retry)));
-  };
+  if (WT_OFFER && typeof WebTransport === "function" && wtFailures < 2 && !wtBlocked.get()) {
+    connectWebTransport().then(() => wtBlocked.clear(),
+                               () => { wtFailures++; wtBlocked.set(); chan = null; connectWebSocket(); });
+  } else connectWebSocket();
 }
 retryBtn.addEventListener("click", () => location.reload());
 
@@ -314,7 +423,7 @@ function flush() {
 }
 const later = () => { if (!raf) raf = requestAnimationFrame(flush); };   // at most one move per screen refresh
 const button = b => (b === 1 ? 1 : b === 2 ? 2 : 0);
-const canControl = () => !viewOnly && ws && ws.readyState === 1;
+const canControl = () => !viewOnly && !!chan && chan.open;
 
 // Mouse capture (Ctrl+Alt+M; Esc releases it): movement goes as relative motion for mouse-look, unaccelerated where
 // the browser allows - the way game-streaming clients do it.

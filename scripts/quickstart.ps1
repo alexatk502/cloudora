@@ -20,6 +20,15 @@ if (-not (Test-Path $Cloudora)) {
     & $Py @PyArgs -m venv $Venv
     & (Join-Path $Venv "Scripts\python.exe") -m pip install -q --upgrade pip
     & (Join-Path $Venv "Scripts\pip.exe") install -q -e $Root
+    New-Item -ItemType File -Force (Join-Path $Venv ".cloudora-installed") | Out-Null
+} else {
+    $Stamp = Join-Path $Venv ".cloudora-installed"
+    $Project = Join-Path $Root "pyproject.toml"
+    if (-not (Test-Path $Stamp) -or (Get-Item $Project).LastWriteTime -gt (Get-Item $Stamp).LastWriteTime) {
+        Write-Host "[cloudora] updated: installing what the new version needs"
+        & (Join-Path $Venv "Scripts\pip.exe") install -q -e $Root
+        New-Item -ItemType File -Force $Stamp | Out-Null
+    }
 }
 & $Cloudora @args
 exit $LASTEXITCODE

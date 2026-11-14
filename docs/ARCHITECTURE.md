@@ -12,6 +12,7 @@ viewer page and one WebSocket, plus a desktop backend for the host's platform.
 | Secret key | `secret.py` | the key, one-time sign-in challenges, wrong-key rate limits |
 | Sessions | `sessions.py` | signed-in browsers, in memory only |
 | Portal | `portal/app.py`, `portal/pages.py` | the sign-in page, the viewer page (just the screen), the `/ws` WebSocket |
+| WebTransport | `webtransport.py` | the same viewer protocol over HTTP/3 (QUIC, UDP): independent streams, sound as datagrams, loss-tolerant congestion control |
 | Viewer | `portal/viewer.js` | the browser side: draws pictures, plays sound, sends mouse/touch/keyboard; no settings |
 | Desktop service | `desktop/service.py` | one viewer at a time, capture loop, automatic quality, input |
 | Sound | `desktop/audio.py` | what the host plays, as Opus (Linux: PipeWire + GStreamer; Windows: WASAPI loopback) |
@@ -35,6 +36,35 @@ viewer page and one WebSocket, plus a desktop backend for the host's platform.
 4. The capture loop runs on its own thread: wait for the next picture (`grab`), encode it, send it.
    Input runs on a second thread, so a click never waits behind a picture being encoded.
 
+## Transport: WebTransport first, WebSocket as fallback
+
+Over Wi-Fi, packets are often late or out of order rather than lost. TCP cannot tell the difference: on a real
+connection 58 of 63 retransmissions were needless (DSACK), yet each halved the host's sending window (CUBIC) until it
+was 6 packets, and a keyframe then needed several round trips - lag spikes of hundreds of milliseconds. The kernel's
+BBR would help but needs root to enable, so Cloudora carries the stream itself over **WebTransport** (HTTP/3 over
+QUIC on UDP, `aioquic`), where it chooses the reaction:
+
+* **Independent streams.** Pictures on one stream, control and input on the viewer's own stream, sound as unreliable
+  datagrams (a lost 10 ms packet is skipped, never waited for). A picture being repaired never delays a click or
+  the sound - the reason Media over QUIC (started at Twitch) uses QUIC for live video.
+* **Gentle congestion control.** Real congestion is caught earlier by flow.py's delay-based pacing, so QUIC's own
+  window shrinks by 15 % (not 50 %) once per loss episode and never below 512 KB; it also sets QUIC's pacing rate
+  (window / round trip), so a keyframe leaves in a few milliseconds.
+* **Certificate pinning.** WebTransport accepts a self-signed certificate when the page names its SHA-256 hash and
+  it lasts at most 14 days; Cloudora makes one at every start and the viewer page carries its hash.
+* **Fallback.** Offered only for direct HTTPS (a tunnel carries no UDP). If it does not connect within 2 s (UDP
+  blocked), the viewer uses the WebSocket and remembers that for an hour.
+
+Measured with real headless Firefox receiving a 1280×720, 60 fps moving picture (keyframe every 3 s) through
+emulated Wi-Fi (netem in a network namespace: per-direction delay, correlated jitter, loss, packets kept in order);
+delay above the best picture's:
+
+| Link | WebSocket (TCP) | WebTransport (QUIC) |
+|---|---|---|
+| clean | 56 fps, p99 3 ms | 60 fps, p99 3 ms |
+| busy Wi-Fi (10±12 ms, 1 % loss) | 59 fps, p95 23, p99 44, max 73 ms | 58 fps, p95 17, p99 23, max 31 ms |
+| bad Wi-Fi (20±25 ms, 2 % loss) | 46 fps, p95 58, p99 103, max 273 ms, 8 spikes > 100 ms | 54 fps, p95 36, p99 41, max 57 ms, none > 100 ms |
+
 ## The picture pipeline (low latency, smooth motion)
 
 * **Encoder plan** (`video.py`, probed once at start-up and shown in the banner). Best first: (1) zero-copy GPU
@@ -45,7 +75,11 @@ viewer page and one WebSocket, plus a desktop backend for the host's platform.
   mid-session, the viewer continues with the next entry.
 * **Zero copy on Linux/Wayland** (`gpu.py`): the desktop hands the screen to GStreamer as DMA-BUF; `vapostproc`
   converts and scales it on the GPU; `vaav1enc`/`vah265enc`/`vah264enc` encode; Python only receives the compressed
-  picture. A one-picture leaky queue keeps the encoder on the newest screen. Quality (quantiser) and size change
+  picture. A one-picture leaky queue keeps the encoder on the newest screen, and at most one encoded picture waits
+  for Cloudora, which takes each the moment it is ready: encoded pictures cannot be dropped (each builds on the
+  last), so a deeper buffer filled during any network stall and never drained - measured, pictures went out 28 ms
+  old at a steady 60 fps (p95 52 ms) and ~90 ms old after a stall; now 4-5 ms. A probe before the GPU converter
+  holds faster screens to the frame rate wanted (videorate cannot: screens report a variable frame rate). Quality (quantiser) and size change
   live without restarting; keyframes are requested with a force-key-unit event. Measured on the real screen:
   54-58 fps, 11-14 ms round trip, 73-152 kb/s, 18.5 % of one CPU core for the whole Cloudora process - against
   1.5-1.8 cores and 0.3-1.8 Mb/s for software H.264.
@@ -63,10 +97,12 @@ viewer page and one WebSocket, plus a desktop backend for the host's platform.
   widened to 16-pixel boundaries (JPEG's own blocks, so patches join without seams), and touching bands merged.
   Above 55 % of the screen one whole picture is sent instead. An unchanged screen costs one memory compare.
 * **Scaled to the viewer.** The viewer reports its window size in device pixels; pictures are never larger.
+* **Frame rate from the viewer's display.** 120 pictures a second when the viewing screen refreshes at 100 Hz or
+  more (measured in the page), 60 otherwise; never more than the host's screen produces.
 * **Pipelined, never queued** (`desktop/flow.py`). Each picture has a sequence number; the viewer acknowledges it
   once drawn. From the acknowledgements Cloudora measures the link's *base delay* (only from pictures sent while
   nothing else was in flight, so queueing never inflates it; if the link stays busy for 2 s it drains once to
-  re-measure), its *jitter* (as TCP does) and its *delivery rate*. Up to 10 pictures may be in flight, as many as fit
+  re-measure), its *jitter* (as TCP does) and its *delivery rate*. Up to 20 pictures may be in flight, as many as fit
   in the recent 90th-percentile round trip at the frame rate - so slow-to-answer Wi-Fi (50-150 ms, power saving)
   still carries a full frame rate. A queue is prevented separately: beyond what the link delivers in one base delay
   (+40 ms), at most 24 KB more may be in flight, and only while the round trip stays within the link's own jitter
@@ -150,7 +186,7 @@ Nothing about viewers or the screen. On disk, in the data directory (mode 0700):
 
 ```
 src/cloudora/
-  __main__.py  server.py  config.py  secret.py  sessions.py  tls.py  anywhere.py  errors.py
+  __main__.py  server.py  config.py  secret.py  sessions.py  tls.py  anywhere.py  webtransport.py  errors.py
   desktop/  __init__.py (interface, backend choice)  service.py  frames.py  keys.py
             flow.py  video.py  gpu.py  audio.py  mss_capture.py  windows.py  macos.py  x11.py  wayland.py
   portal/   app.py  pages.py  viewer.js

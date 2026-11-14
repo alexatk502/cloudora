@@ -28,7 +28,7 @@ DRAIN_EVERY = 2.0        # busy this long without a clean sample: let the link d
 LOST_AFTER = 3.0         # an acknowledgement this late is lost: forget everything in flight
 SLACK = 0.04             # seconds of extra data in flight: covers capturing and encoding the next picture
 RECENT = 2.0             # seconds of round trips whose 90th percentile sizes the window
-MAX_FRAMES = 10
+MAX_FRAMES = 20          # a round trip's worth of pictures, up to 166 ms at 120 fps (333 ms at 60)
 JITTER_CAP = 0.1         # never excuse more than 100 ms of extra delay as "jitter": a real queue grows beyond it
 FREE_BYTES = 24_000      # beyond the delivery-rate limit, at most this much may be in flight while no queue builds
 

@@ -427,7 +427,10 @@ class Viewer:
         if nw and nh:                                    # the screen may be smaller than the viewer's window
             k = min(1.0, s.max_w / nw, s.max_h / nh)
             full = nw * nh * k * k
-        need = BITS_PER_PIXEL.get(s.codec, 0.05) * full * s.fps / 1000      # kb/s for the full size
+        # kb/s for the full size; above 60 fps pictures differ less from one to the next, so bits grow with the
+        # square root of the extra frame rate rather than in proportion
+        rate = s.fps if s.fps <= 60 else 60 * math.sqrt(s.fps / 60)
+        need = BITS_PER_PIXEL.get(s.codec, 0.05) * full * rate / 1000
         for step in LADDER:
             margin = 1.3 if step > self.scale else 1.0
             if kbps >= need * step * step * margin:
@@ -494,7 +497,10 @@ class Viewer:
             if self.session is not None and now - getattr(self, "_touched", 0) > 30:
                 self.session.touch()
                 self._touched = now
-            await asyncio.sleep(max(0.0, interval - (time.monotonic() - started)))
+            if self.gpu is not None and s.engine == "gpu":
+                await asyncio.sleep(0)       # the GPU encoder sets the pace (and the rate): take each picture at once
+            else:
+                await asyncio.sleep(max(0.0, interval - (time.monotonic() - started)))
 
     def _capture(self, backend: Backend, s: Settings, interval: float):
         """On the capture thread: wait for the next picture and encode it (H.264) or what changed in it (JPEG)."""
@@ -536,7 +542,7 @@ class Viewer:
             return None
 
     def _capture_gpu_once(self, backend: Backend, s: Settings, interval: float):
-        if self.gpu is None or (self.gpu.kind, self.gpu.preset) != (s.codec, s.preset):
+        if self.gpu is None or (self.gpu.kind, self.gpu.preset, self.gpu.fps) != (s.codec, s.preset, s.fps):
             if self.gpu is not None:
                 self.gpu.close()
                 self.gpu = None
@@ -581,7 +587,7 @@ class Viewer:
         k = min(1.0, s.max_w * self.scale / frame.width, s.max_h * self.scale / frame.height)
         size = (even(round(frame.width * k)), even(round(frame.height * k)))
         if self.video is None or (self.video.width, self.video.height, self.video.preset, self.video.kind,
-                                  self.video.engine) != (*size, s.preset, s.codec, s.engine):
+                                  self.video.engine, self.video.fps) != (*size, s.preset, s.codec, s.engine, s.fps):
             if self.video is not None:
                 self.video.close()
             self.video = VideoEncoder(size[0], size[1], s.preset, s.fps, self.max_kbps, kind=s.codec,
@@ -701,7 +707,7 @@ class Viewer:
             v = msg.get(name)
             return max(lo, min(hi, int(v))) if isinstance(v, (int, float)) and math.isfinite(v) else default
         s.max_w, s.max_h = num("w", 160, 8192, s.max_w), num("h", 120, 8192, s.max_h)
-        s.quality, s.fps = num("q", 20, 95, s.quality), num("fps", 5, 60, s.fps)
+        s.quality, s.fps = num("q", 20, 95, s.quality), num("fps", 5, 120, s.fps)
         s.auto = bool(msg.get("auto", s.auto))
         if "codecs" in msg:
             self.viewer_codecs = msg["codecs"] if isinstance(msg["codecs"], list) else []
